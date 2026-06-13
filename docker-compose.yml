@@ -1,0 +1,191 @@
+﻿# LLM Wiki Web 的 Docker Compose 部署配置。
+# 适用于 Ubuntu + Docker Compose + 25000+ 法律文档 ZIP/Office/PDF 批量上传。
+
+services:
+  # Web 服务本体：包含前端静态资源、Node/Express API、文档解析和摄入队列。
+  llm-wiki-web:
+    # 使用当前目录下的 Dockerfile 构建镜像；代码更新后需要重新 build。
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # 固定镜像名，便于 1Panel / docker images 中识别。
+    image: llm-wiki-web:local
+
+    # 固定容器名，便于 docker logs / docker exec / 1Panel 管理。
+    container_name: llm-wiki-web
+
+    # 启用 tini 作为 1 号进程，帮助 LibreOffice/Pandoc 等子进程被正确回收。
+    init: true
+
+    # Office/PDF 转换和大批量文件扫描会同时触碰大量文件句柄。
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+      nproc: 65535
+
+    # LibreOffice 在转换复杂 Office 文件时会使用共享内存。
+    shm_size: "1gb"
+
+    # 端口映射：宿主机端口:容器端口。
+    # 你的浏览器访问 http://服务器IP:19827，容器内部仍监听 3000。
+    ports:
+      - "19827:3000"
+
+    # 运行时环境变量。修改后需要 docker compose up -d --build 或重建容器生效。
+    environment:
+      # 容器时区，日志时间按中国时区显示。
+      TZ: Asia/Shanghai
+
+      # 生产模式运行 Node 服务。
+      NODE_ENV: production
+
+      # 容器内 Node 服务监听端口，需要和 ports 右侧一致。
+      PORT: "3000"
+
+      # 容器内数据目录；下面 volumes 会把宿主机 ./data 挂载到这里。
+      LLM_WIKI_DATA_DIR: /data
+
+      # LibreOffice/Pandoc 临时工作目录；下面会挂载命名卷，避免大量临时文件挤占镜像层。
+      TMPDIR: /tmp
+      HOME: /tmp
+
+      # Web 上传分片大小，单位 MB。
+      # 直接用 19827 端口访问时 8MB 稳定且速度较好；如果前面套了 Nginx/1Panel 反代，
+      # 反代的 client_max_body_size 必须大于这个值，建议设 32m。
+      LLM_WIKI_UPLOAD_CHUNK_MB: "8"
+
+      # 单个文件最多允许的分片数量。
+      # 8MB * 1000000 约等于 8TB，足够超大 ZIP，同时防止异常会话无限增长。
+      LLM_WIKI_MAX_UPLOAD_CHUNKS: "1000000"
+
+      # 兼容旧 multipart 上传接口的文件数量上限。
+      # 新版浏览器上传已经统一走分片接口，这里主要给旧客户端/脚本兜底。
+      LLM_WIKI_MAX_UPLOAD_FILES: "30000"
+
+      # 兼容旧 multipart 上传接口的单文件大小上限，单位 MB。
+      # 新版浏览器上传受 LLM_WIKI_UPLOAD_CHUNK_MB 控制，不再一次性提交大请求体。
+      LLM_WIKI_MAX_UPLOAD_SIZE_MB: "10240"
+
+      # Node HTTP 请求超时，单位毫秒；0 表示禁用，适合大文件分片上传。
+      LLM_WIKI_REQUEST_TIMEOUT_MS: "0"
+
+      # Node socket 空闲超时，单位毫秒；0 表示禁用，避免慢速上传被 Node 主动断开。
+      LLM_WIKI_SOCKET_TIMEOUT_MS: "0"
+
+      # 摄入队列每处理多少个文件写一次进度。
+      # 20 比默认 50 更容易看到进度变化，适合 25000+ 文档导入。
+      LLM_WIKI_QUEUE_FLUSH_INTERVAL: "20"
+
+      # 单个概念/实体页面最多沉淀的来源笔记数量。
+      # 过大容易让单个 Markdown 页面和预览卡顿，这里给大法律库留足空间但不无限放开。
+      LLM_WIKI_MAX_TOPIC_NOTES: "3000"
+
+      # 自动更新首页/总览时最多扫描多少个 Wiki 页面元数据，避免超大库摄入结束时卡住。
+      LLM_WIKI_MAX_INDEX_FILES: "2000"
+      LLM_WIKI_MAX_OVERVIEW_FILES: "2000"
+
+      # 自动建立概念/实体索引时最多扫描多少个 Wiki 页面元数据。
+      LLM_WIKI_MAX_TOPIC_INDEX_FILES: "5000"
+
+      # 搜索原始文本文件时单文件读取上限，单位 bytes。
+      # Office/PDF 会优先使用转换后的 Markdown 参与搜索；4MB 对法规正文比较稳。
+      LLM_WIKI_MAX_RAW_SEARCH_BYTES: "4194304"
+
+      # 知识图谱接口最多返回节点数，避免浏览器一次渲染过多节点。
+      LLM_WIKI_MAX_GRAPH_NODES: "1500"
+
+      # 知识图谱接口最多返回边数，避免图谱 JSON 和 SVG 过大。
+      LLM_WIKI_MAX_GRAPH_EDGES: "12000"
+
+      # 计算来源重叠关系时，每个页面最多抽样多少个来源，降低大库图谱计算成本。
+      LLM_WIKI_MAX_SOURCE_OVERLAP_FILES: "4"
+
+      # 文件树/图谱读取 Markdown 头部元数据的上限，单位 bytes。
+      LLM_WIKI_METADATA_BYTES: "262144"
+
+      # 问答时最多扫描多少个 Wiki Markdown 正文；来源标题/摘要仍会通过 registry 快速匹配。
+      LLM_WIKI_MAX_SEARCH_FILES: "4000"
+
+      # Lint 手动检查时最多扫描多少个 Wiki Markdown 页面，避免 25000+ 页面一次性全量卡住。
+      LLM_WIKI_MAX_LINT_FILES: "2500"
+
+      # Lint 手动检查最多返回多少条问题，避免前端一次渲染过多结果。
+      LLM_WIKI_MAX_LINT_ISSUES: "1000"
+
+      # 原始来源列表接口默认返回数量，避免调试/扩展接口一次吐回完整大库。
+      LLM_WIKI_RAW_LIST_LIMIT: "500"
+
+      # 原始文件树接口默认遍历数量，避免 25000+ 原始文件被一次性返回。
+      LLM_WIKI_RAW_TREE_LIMIT: "5000"
+
+      # 聊天多模态附件限制，避免把大文件直接塞进 JSON 请求导致页面卡顿。
+      LLM_WIKI_MAX_CHAT_ATTACHMENTS: "6"
+      LLM_WIKI_MAX_CHAT_ATTACHMENT_TEXT_BYTES: "24000"
+      LLM_WIKI_MAX_CHAT_ATTACHMENT_DATA_URL_BYTES: "6291456"
+
+      # 浏览器分片上传时，服务端临时文件名的 UTF-8 字节上限。
+      # 单个超长中文文件名/ZIP 名会自动截断并保留 hash，避免临时路径 File name too long。
+      LLM_WIKI_MAX_UPLOAD_FILE_NAME_BYTES: "180"
+
+      # ZIP 内单个路径段写入磁盘前的 UTF-8 字节上限。
+      # 法规 ZIP 常见超长中文文件名；服务会自动解码 #Uxxxx 并截断保留 hash，避免 File name too long。
+      LLM_WIKI_MAX_ARCHIVE_PATH_SEGMENT_BYTES: "180"
+
+      # 如需开启 API Token，把下一行取消注释并改成自己的长随机字符串。
+      # LLM_WIKI_API_TOKEN: "change-me-to-a-long-random-token"
+
+      # 如需模型能力，可在宿主机环境变量中设置；未设置时应用保持离线可用。
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      VOLCENGINE_API_KEY: ${VOLCENGINE_API_KEY:-}
+      VOLCENGINE_BASE_URL: ${VOLCENGINE_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      VOLCENGINE_MODEL: ${VOLCENGINE_MODEL:-doubao-seed-2-0-lite-260215}
+      VOLCENGINE_CODING_BASE_URL: ${VOLCENGINE_CODING_BASE_URL:-https://ark.cn-beijing.volces.com/api/coding/v3}
+      VOLCENGINE_CODING_MODEL: ${VOLCENGINE_CODING_MODEL:-ark-code-latest}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_BASE_URL: ${GEMINI_BASE_URL:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
+      CUSTOM_API_KEY: ${CUSTOM_API_KEY:-}
+      CUSTOM_BASE_URL: ${CUSTOM_BASE_URL:-}
+      CUSTOM_MODEL: ${CUSTOM_MODEL:-}
+
+    # 数据持久化：宿主机 ./data 保存项目、原始文件、转换结果、队列和设置。
+    volumes:
+      - ./data:/data
+      - llm-wiki-tmp:/tmp
+
+    # 日志大小限制，避免长期运行后容器 JSON 日志占满磁盘。
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+    # 健康检查：确认 Node API 可访问。
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:3000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+    # 停止容器时给后台摄入队列一点收尾时间。
+    stop_grace_period: 120s
+
+    # 容器异常退出后自动重启；手动 docker compose stop 后不会自动拉起。
+    restart: unless-stopped
+
+volumes:
+  llm-wiki-tmp:

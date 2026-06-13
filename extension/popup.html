@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLM Wiki Clipper</title>
+    <style>
+      body {
+        color: #17201b;
+        font: 14px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 0;
+        padding: 12px;
+        width: 320px;
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 10px;
+      }
+
+      input,
+      button {
+        border: 1px solid #d7dfda;
+        border-radius: 8px;
+        font: inherit;
+        min-height: 36px;
+        padding: 8px;
+      }
+
+      button {
+        background: #166f62;
+        color: white;
+        cursor: pointer;
+        width: 100%;
+      }
+
+      #status {
+        color: #64716b;
+        margin-top: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <label>
+      服务地址
+      <input id="baseUrl" value="http://localhost:19827" />
+    </label>
+    <label>
+      Project ID
+      <input id="projectId" placeholder="从 Web 项目 URL 或 API 中复制" />
+    </label>
+    <label>
+      API Token（可选）
+      <input id="apiToken" type="password" placeholder="启用 LLM_WIKI_API_TOKEN 时填写" />
+    </label>
+    <button id="clip">发送当前页面</button>
+    <div id="status"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

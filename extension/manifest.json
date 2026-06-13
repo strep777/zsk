@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "LLM Wiki Web Clipper",
+  "version": "0.1.0",
+  "description": "Send the current page to a local LLM Wiki Web project.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": [
+    "http://localhost:19827/*",
+    "http://127.0.0.1:19827/*",
+    "http://localhost:3000/*",
+    "http://127.0.0.1:3000/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}
