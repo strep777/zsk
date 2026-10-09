@@ -1,5 +1,7 @@
 # LLM Wiki Web
 
+> 本文为详细配置与接口参考。项目介绍和入门教程请先阅读 [README](README.md)。
+
 一个基于 Karpathy “LLM Wiki” 思路的 Web 版知识库：把原始材料编译成可读、可链接、可审查的 Markdown Wiki，而不是只把文档塞进向量库。
 
 ## 功能
@@ -128,7 +130,7 @@ zip -r legal-docx.zip .
 
 ## 本地开发
 
-需要 Node.js 20.19+ 或 22.12+（推荐与容器一致的 Node.js 22）。模型请求默认在 120 秒后超时并进入现有降级流程，可通过 `LLM_WIKI_MODEL_TIMEOUT_MS` 调整。
+Node.js 版本要求见 package.json 的 engines 字段，可使用与容器一致的 Node.js 22.12+ 的 22.x 版本。一般模型请求默认超时为 120 秒；Ollama 原生正式问答另有总时限和空闲时限，摄入分析默认最多 30 秒，详见本文末尾说明。
 
 `npm test` 运行单元和界面回归测试；`npm run test:smoke` 会先构建，再启动隔离数据目录中的服务，检查登录、中文上传、摄入、问答、深研和删除，结束后清理测试数据。
 
