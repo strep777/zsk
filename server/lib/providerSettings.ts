@@ -1,5 +1,15 @@
 import { ProjectSettings, ProviderKind } from "../types.js";
 
+export function hasConfiguredWebSearch(settings?: Pick<ProjectSettings, "webSearchProvider" | "webSearchUrl" | "webSearchApiKey" | "webSearchCollection"> | null): boolean {
+  if (!settings) return false;
+  const url = Boolean(settings.webSearchUrl?.trim());
+  const key = Boolean(settings.webSearchApiKey?.trim());
+  if (settings.webSearchProvider === "typesense") return url && key && Boolean(settings.webSearchCollection?.trim());
+  if (settings.webSearchProvider === "searxng") return url;
+  if (["tavily", "serpapi"].includes(settings.webSearchProvider)) return key;
+  return false;
+}
+
 export const PROVIDER_KINDS: ProviderKind[] = [
   "offline",
   "openai",

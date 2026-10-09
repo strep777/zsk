@@ -1,0 +1,62 @@
+{
+  "environment": "isolated service fixtures",
+  "checks": [
+    {
+      "controlsOutside": 0,
+      "replacement": false,
+      "scrollWidth": 375,
+      "settingsWidth": 375,
+      "toggleDirection": "row",
+      "width": 375
+    },
+    {
+      "controlsOutside": 0,
+      "replacement": false,
+      "scrollWidth": 805,
+      "settingsWidth": 805,
+      "toggleDirection": "row",
+      "width": 805
+    },
+    {
+      "controlsOutside": 0,
+      "replacement": false,
+      "scrollWidth": 821,
+      "settingsWidth": 491,
+      "toggleDirection": "row",
+      "width": 821
+    },
+    {
+      "controlsOutside": 0,
+      "replacement": false,
+      "scrollWidth": 1180,
+      "settingsWidth": 850,
+      "toggleDirection": "row",
+      "width": 1180
+    },
+    {
+      "controlsOutside": 0,
+      "replacement": false,
+      "scrollWidth": 1181,
+      "settingsWidth": 813,
+      "toggleDirection": "row",
+      "width": 1181
+    },
+    {
+      "controlsOutside": 0,
+      "replacement": false,
+      "scrollWidth": 1440,
+      "settingsWidth": 1072,
+      "toggleDirection": "row",
+      "width": 1440
+    }
+  ],
+  "results": [
+    "已获取 2 个模型，选择后可测试实际回答。",
+    "模型测试成功，已收到实际回答。（1 ms）\nOK，模型连接测试成功。",
+    "Typesense 连接和 API Key 验证成功；同步索引可进一步验证写入与检索权限。",
+    "索引同步完成：1 份文档，更新 1 份，移除 0 份。",
+    "指令格式有效；可使用“测试效果”查看模型的实际回答。",
+    "模型测试成功，已收到实际回答。（1 ms）\nOK，模型连接测试成功。",
+    "已连接 隔离 MCP 服务，发现 1 个工具、1 个资源。（13 ms）"
+  ]
+}

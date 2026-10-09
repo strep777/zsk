@@ -10,11 +10,14 @@
     "server:dev": "tsx watch server/index.ts",
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node dist/server/index.js",
+    "repair:topics": "node dist/server/repair-topics.js",
     "test": "node scripts/clean-test-temp.mjs && vitest run",
+    "test:smoke": "npm run build && node scripts/run-smoke.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json"
   },
   "dependencies": {
-    "adm-zip": "^0.5.16",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "adm-zip": "^0.6.1",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "iconv-lite": "^0.7.2",
@@ -38,7 +41,8 @@
     "@types/unist": "^3.0.3",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.0",
-    "katex": "^0.16.11",
+    "jsdom": "^26.1.0",
+    "katex": "^0.18.2",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -49,9 +53,13 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.6",
-    "vitest": "^3.2.4"
+    "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "katex": "$katex",
+    "shell-quote": "^1.11.0"
   },
   "engines": {
-    "node": ">=18.18"
+    "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
   }
 }

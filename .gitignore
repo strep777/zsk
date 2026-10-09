@@ -1,0 +1,15 @@
+node_modules/
+dist/
+data/
+.npm-cache/
+server.log
+server.err.log
+tests/.tmp-*/
+tests/.qa-*/
+tests/.qa-*.json
+.env
+.env.local
+*.log
+reference-llm_wiki/
+qa-artifacts/*-tmp/
+tests/.runtime-*/

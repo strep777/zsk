@@ -5,6 +5,7 @@ import cors from "cors";
 import { createApiRouter, authMiddleware, errorHandler } from "./routes.js";
 import { ensureDataRoot, listProjects } from "./lib/storage.js";
 import { processProjectQueue } from "./lib/ingest.js";
+import { listResearchTasks, runResearchTask } from "./lib/research.js";
 
 const port = Number(process.env.PORT || 3000);
 const app = express();
@@ -40,6 +41,10 @@ app.use(errorHandler);
 const projects = await listProjects();
 for (const project of projects) {
   processProjectQueue(project).catch((error) => console.error("[startup] queue resume failed", error));
+  const tasks = await listResearchTasks(project);
+  for (const task of tasks.filter((item) => item.status === "queued" || item.status === "running")) {
+    runResearchTask(project, task.id).catch((error) => console.error("[startup] research resume failed", error));
+  }
 }
 
 const server = app.listen(port, "0.0.0.0", () => {

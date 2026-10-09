@@ -2,6 +2,7 @@ const baseUrlInput = document.getElementById("baseUrl");
 const projectIdInput = document.getElementById("projectId");
 const apiTokenInput = document.getElementById("apiToken");
 const statusEl = document.getElementById("status");
+const clipButton = document.getElementById("clip");
 
 chrome.storage.sync.get(["baseUrl", "projectId", "apiToken"], (values) => {
   if (values.baseUrl) baseUrlInput.value = values.baseUrl;
@@ -10,20 +11,26 @@ chrome.storage.sync.get(["baseUrl", "projectId", "apiToken"], (values) => {
 });
 
 document.getElementById("clip").addEventListener("click", async () => {
-  const baseUrl = baseUrlInput.value.replace(/\/+$/, "");
+  if (clipButton.disabled) return;
+  const baseUrl = baseUrlInput.value.trim().replace(/\/+$/, "");
   const projectId = projectIdInput.value.trim();
   const apiToken = apiTokenInput.value.trim();
-  chrome.storage.sync.set({ baseUrl, projectId, apiToken });
 
   if (!baseUrl) {
     statusEl.textContent = "请先填写服务地址。";
     return;
   }
   if (!projectId) {
-    statusEl.textContent = "请先填写 Project ID。";
+    statusEl.textContent = "请先填写知识库 ID。";
     return;
   }
+  try {
+    const serviceUrl = new URL(baseUrl);
+    if (!/^https?:$/.test(serviceUrl.protocol) || serviceUrl.search || serviceUrl.hash || serviceUrl.username || serviceUrl.password) throw new Error();
+  } catch { statusEl.textContent = "请填写有效的 HTTP 或 HTTPS 服务地址。"; return; }
+  chrome.storage.sync.set({ baseUrl, projectId, apiToken });
 
+  clipButton.disabled = true;
   try {
     statusEl.textContent = "正在读取当前页面...";
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -31,6 +38,7 @@ document.getElementById("clip").addEventListener("click", async () => {
       statusEl.textContent = "无法读取当前标签页。";
       return;
     }
+    if (!/^https?:\/\//i.test(tab.url || "")) { statusEl.textContent = "浏览器内部页面无法剪藏，请打开普通网页后重试。"; return; }
 
     const [injected] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -48,7 +56,7 @@ document.getElementById("clip").addEventListener("click", async () => {
     statusEl.textContent = "正在发送...";
     const headers = { "content-type": "application/json" };
     if (apiToken) headers["x-api-token"] = apiToken;
-    const response = await fetch(`${baseUrl}/api/v1/projects/${projectId}/sources/clip`, {
+    const response = await fetch(`${baseUrl}/api/v1/projects/${encodeURIComponent(projectId)}/sources/clip`, {
       method: "POST",
       headers,
       body: JSON.stringify(injected.result)
@@ -61,5 +69,5 @@ document.getElementById("clip").addEventListener("click", async () => {
     statusEl.textContent = `发送失败：${payload?.error || response.status}`;
   } catch (error) {
     statusEl.textContent = `发送失败：${error instanceof Error ? error.message : String(error)}`;
-  }
+  } finally { clipButton.disabled = false; }
 });

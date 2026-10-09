@@ -14,6 +14,13 @@ export default defineConfig({
   },
   build: {
     outDir: "dist/client",
-    sourcemap: true
+    sourcemap: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.replace(/\\/g, "/").includes("/node_modules/katex/")) return "math-renderer";
+        }
+      }
+    }
   }
 });

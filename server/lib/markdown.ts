@@ -7,21 +7,17 @@ export interface ParsedMarkdown {
 }
 
 export function parseMarkdown(input: string): ParsedMarkdown {
-  if (!input.startsWith("---")) {
+  const block = input.match(/^\uFEFF?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/);
+  if (!block) {
     return { frontmatter: {}, body: input };
   }
 
-  const end = input.indexOf("\n---", 3);
-  if (end === -1) {
-    return { frontmatter: {}, body: input };
-  }
-
-  const yamlBlock = input.slice(3, end).trim();
-  const bodyStart = input.indexOf("\n", end + 4);
-  const body = bodyStart === -1 ? "" : input.slice(bodyStart + 1);
   try {
-    const frontmatter = (yaml.load(yamlBlock) ?? {}) as Record<string, unknown>;
-    return { frontmatter, body };
+    const value = yaml.load(block[1]);
+    if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) {
+      return { frontmatter: {}, body: input };
+    }
+    return { frontmatter: (value ?? {}) as Record<string, unknown>, body: input.slice(block[0].length) };
   } catch {
     return { frontmatter: {}, body: input };
   }
@@ -51,9 +47,10 @@ export function extractTitle(markdown: string, fallback: string): string {
 
 export function extractWikiLinks(markdown: string): string[] {
   const links = new Set<string>();
+  const source = linkableMarkdown(markdown);
   const wikiLink = /\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g;
   let match: RegExpExecArray | null;
-  while ((match = wikiLink.exec(markdown))) {
+  while ((match = wikiLink.exec(source))) {
     links.add(match[1].trim());
   }
   return [...links].filter(Boolean);
@@ -61,13 +58,28 @@ export function extractWikiLinks(markdown: string): string[] {
 
 export function extractMarkdownLinks(markdown: string): string[] {
   const links = new Set<string>();
+  const source = linkableMarkdown(markdown);
   const mdLink = /\[[^\]]+\]\(([^)]+)\)/g;
   let match: RegExpExecArray | null;
-  while ((match = mdLink.exec(markdown))) {
+  while ((match = mdLink.exec(source))) {
     const href = match[1].trim();
     if (!href.startsWith("http")) links.add(href);
   }
   return [...links].filter(Boolean);
+}
+
+function linkableMarkdown(markdown: string): string {
+  let fence = "";
+  let fenceLength = 0;
+  return parseMarkdown(markdown).body.split(/\r?\n/).map((line) => {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (fence) {
+      if (marker && marker[1][0] === fence && marker[1].length >= fenceLength && !marker[2].trim()) fence = "";
+      return "";
+    }
+    if (marker) { fence = marker[1][0]; fenceLength = marker[1].length; return ""; }
+    return line.replace(/(`+)[\s\S]*?\1/g, "");
+  }).join("\n");
 }
 
 export function asStringArray(value: unknown): string[] {
@@ -79,6 +91,19 @@ export function asStringArray(value: unknown): string[] {
 export function mergeUnique<T>(first: T[], second: T[]): T[] {
   return [...new Set([...first, ...second])];
 }
+
+export function markdownPlainText(markdown: string): string {
+  return parseMarkdown(markdown).body
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+    .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_match, target: string, label?: string) => label || target)
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/^ {0,3}(?:`{3,}|~{3,})[^\n]*$/gm, "")
+    .replace(/^ {0,3}(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/gm, "")
+    .replace(/(`+)([^`]+)\1/g, "$2")
+    .replace(/\*\*([^*]+)\*\*|__([^_]+)__/g, (_match, bold?: string, underline?: string) => bold || underline || "");
+}
+
+export function escapeMarkdownText(value: string): string { return value.replace(/[\\`*_[\]<>]/g, "\\$&"); }
 
 export function normalizeWikiPath(value: string): string {
   return value.replace(/\\/g, "/").replace(/^\/+/, "");

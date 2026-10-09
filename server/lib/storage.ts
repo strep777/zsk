@@ -2,11 +2,24 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { Project, ProjectSettings, QueueItem, SourceRecord } from "../types.js";
+import {
+  McpServerConfig,
+  ModelProfile,
+  Project,
+  ProjectSettings,
+  QueueItem,
+  SkillDefinition,
+  SourceRecord
+} from "../types.js";
 import { envApiKeyFor, envBaseUrlFor, envModelFor, isProviderKind, providerDefaults } from "./providerSettings.js";
 import { idFrom, slugify } from "./slug.js";
 import { readableTextOrFallback } from "./text.js";
 import { nowIso } from "./time.js";
+import { serializeMarkdown } from "./markdown.js";
+import { invalidateSearch } from "./searchRevision.js";
+import { textInput, validateSettingsInput } from "./validation.js";
+import { withResourceLock } from "./locks.js";
+import { DEFAULT_SYSTEM_PROMPT } from "./defaultPrompt.js";
 
 export const DATA_ROOT = path.resolve(process.env.LLM_WIKI_DATA_DIR ?? "data");
 const PROJECTS_INDEX = path.join(DATA_ROOT, "projects.json");
@@ -19,11 +32,20 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   model: "",
   baseUrl: "",
   apiKey: undefined,
-  systemPrompt: "你是一个知识库编译器。把输入材料归纳成带来源、可互链、可审查的 Markdown Wiki。",
-  webSearchProvider: "none"
+  activeModelId: undefined,
+  modelProfiles: [],
+  systemPrompt: DEFAULT_SYSTEM_PROMPT,
+  webSearchProvider: "typesense",
+  localSearchProvider: "builtin",
+  skills: [],
+  mcpServers: []
 };
 
-const WEB_SEARCH_PROVIDERS = new Set<ProjectSettings["webSearchProvider"]>(["none", "searxng", "tavily", "serpapi"]);
+const WEB_SEARCH_PROVIDERS = new Set<ProjectSettings["webSearchProvider"]>(["none", "typesense", "searxng", "tavily", "serpapi"]);
+const MCP_TRANSPORTS = new Set<McpServerConfig["transport"]>(["stdio", "http", "sse"]);
+const maxSettingsModelProfiles = readPositiveInteger("LLM_WIKI_MAX_MODEL_PROFILES", 24);
+const maxSettingsSkills = readPositiveInteger("LLM_WIKI_MAX_SKILLS", 24);
+const maxSettingsMcpServers = readPositiveInteger("LLM_WIKI_MAX_MCP_SERVERS", 16);
 
 export async function ensureDataRoot(): Promise<void> {
   dataRootInitialization ??= initializeDataRoot().catch((error) => {
@@ -47,6 +69,8 @@ export async function listProjects(): Promise<Project[]> {
 }
 
 export async function createProject(input: { name: string; description?: string }): Promise<Project> {
+  textInput(input.name, "知识库名称", { required: true, max: 200, singleLine: true });
+  textInput(input.description, "知识库用途", { max: 4000 });
   await ensureDataRoot();
   return withProjectsIndexLock(async () => {
     const projects = await readJson<Project[]>(PROJECTS_INDEX, []);
@@ -125,15 +149,14 @@ export async function readText(filePath: string, fallback = ""): Promise<string>
 }
 
 export async function writeText(filePath: string, content: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, content, "utf8");
+  await writeAtomicText(filePath, content);
 }
 
 export async function readJson<T>(filePath: string, fallback: T): Promise<T> {
   try {
     const content = await fs.readFile(filePath, "utf8");
     if (!content.trim()) return fallback;
-    return JSON.parse(content) as T;
+    return JSON.parse(content.replace(/^\uFEFF/, "")) as T;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return fallback;
     throw error;
@@ -141,11 +164,24 @@ export async function readJson<T>(filePath: string, fallback: T): Promise<T> {
 }
 
 export async function writeJson<T>(filePath: string, content: T): Promise<void> {
+  await writeAtomicText(filePath, `${JSON.stringify(content, null, 2)}\n`);
+}
+
+async function writeAtomicText(filePath: string, content: string): Promise<void> {
   const directory = path.dirname(filePath);
   await fs.mkdir(directory, { recursive: true });
   const tempPath = path.join(directory, `.${path.basename(filePath)}.${randomUUID()}.tmp`);
-  await fs.writeFile(tempPath, `${JSON.stringify(content, null, 2)}\n`, "utf8");
-  await fs.rename(tempPath, filePath);
+  try {
+    await fs.writeFile(tempPath, content, "utf8");
+    for (let attempt = 0; ; attempt += 1) {
+      try { await fs.rename(tempPath, filePath); break; }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (attempt >= 6 || !["EPERM", "EACCES", "EBUSY"].includes(code || "")) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 20 * 2 ** attempt));
+      }
+    }
+  } finally { await fs.rm(tempPath, { force: true }).catch(() => undefined); }
 }
 
 export async function listFiles(root: string, options: { extensions?: string[]; limit?: number } = {}): Promise<string[]> {
@@ -163,6 +199,8 @@ export async function listFiles(root: string, options: { extensions?: string[]; 
       throw error;
     }
 
+    // Keep root navigation files available before a limited scan enters large subdirectories.
+    entries.sort((a, b) => Number(a.isDirectory()) - Number(b.isDirectory()) || a.name.localeCompare(b.name, "zh-CN"));
     for (const entry of entries) {
       if (limit && files.length >= limit) return;
       if (entry.name === "node_modules" || entry.name === ".git") continue;
@@ -201,6 +239,7 @@ export async function readSources(project: Project): Promise<SourceRecord[]> {
 
 export async function writeSources(project: Project, sources: SourceRecord[]): Promise<void> {
   await writeJson(sourcesPath(project), sources);
+  invalidateSearch(project.root);
 }
 
 export async function readQueue(project: Project): Promise<QueueItem[]> {
@@ -218,25 +257,64 @@ export async function readSettings(project: Project): Promise<ProjectSettings> {
     ? stored.webSearchProvider
     : DEFAULT_SETTINGS.webSearchProvider;
   const defaults = providerDefaults(provider);
+  const legacyModel = stored.model || envModelFor(provider) || defaults.model;
+  const legacyBaseUrl = stored.baseUrl || envBaseUrlFor(provider) || defaults.baseUrl;
+  const legacyApiKey = stored.apiKey || envApiKeyFor(provider);
+  const modelProfiles = normalizeModelProfiles(
+    stored.modelProfiles,
+    legacyModelProfile({ provider, model: legacyModel, baseUrl: legacyBaseUrl, apiKey: legacyApiKey })
+  );
+  const activeModelId = resolveActiveModelId(stored.activeModelId, modelProfiles);
+  const activeModel = activeModelId ? modelProfiles.find((profile) => profile.id === activeModelId) : undefined;
   return {
     ...DEFAULT_SETTINGS,
     ...defaults,
     ...stored,
-    provider,
+    provider: activeModel?.provider ?? (Array.isArray(stored.modelProfiles) ? "offline" : provider),
     webSearchProvider,
-    apiKey: stored.apiKey || envApiKeyFor(provider),
-    model: stored.model || envModelFor(provider) || defaults.model,
-    baseUrl: stored.baseUrl || envBaseUrlFor(provider) || defaults.baseUrl
+    systemPrompt: typeof stored.systemPrompt === "string" && stored.systemPrompt.trim() ? stored.systemPrompt : DEFAULT_SYSTEM_PROMPT,
+    localSearchProvider: "builtin",
+    ...(stored.localSearchProvider === "typesense" ? {
+      webSearchProvider: "typesense" as const,
+      webSearchUrl: stored.webSearchUrl || stored.typesenseUrl,
+      webSearchApiKey: stored.webSearchApiKey || stored.typesenseApiKey,
+      webSearchCollection: stored.webSearchCollection || stored.typesenseCollection
+    } : {}),
+    activeModelId,
+    modelProfiles,
+    skills: normalizeSkills(stored.skills),
+    mcpServers: normalizeMcpServers(stored.mcpServers),
+    apiKey: activeModel?.apiKey ?? legacyApiKey,
+    model: activeModel?.model ?? legacyModel,
+    baseUrl: activeModel?.baseUrl ?? legacyBaseUrl
   };
 }
 
 export async function writeSettings(project: Project, settings: Partial<ProjectSettings>): Promise<ProjectSettings> {
+  validateSettingsInput(settings);
+  return withResourceLock(`${project.root}:settings`, () => writeSettingsLocked(project, settings));
+}
+
+async function writeSettingsLocked(project: Project, settings: Partial<ProjectSettings>): Promise<ProjectSettings> {
   const current = await readSettings(project);
   if (settings.provider !== undefined && !isProviderKind(settings.provider)) {
     throw Object.assign(new Error(`Invalid provider: ${String(settings.provider)}`), { status: 400 });
   }
   if (settings.webSearchProvider !== undefined && !isWebSearchProvider(settings.webSearchProvider)) {
     throw Object.assign(new Error(`Invalid webSearchProvider: ${String(settings.webSearchProvider)}`), { status: 400 });
+  }
+  if (settings.localSearchProvider !== undefined && !["builtin", "typesense"].includes(settings.localSearchProvider)) {
+    throw Object.assign(new Error("请选择有效的本地搜索引擎。"), { status: 400 });
+  }
+  if (settings.skills !== undefined && !Array.isArray(settings.skills)) throw Object.assign(new Error("Skill 配置需要是列表。"), { status: 400 });
+  for (const skill of settings.skills || []) {
+    if (skill.enabled !== false && !skill.prompt?.trim()) throw Object.assign(new Error("已启用的 Skill 指令不能为空，请填写指令或移除空卡片。"), { status: 400 });
+  }
+  if (settings.mcpServers !== undefined && !Array.isArray(settings.mcpServers)) throw Object.assign(new Error("MCP 配置需要是列表。"), { status: 400 });
+  for (const server of settings.mcpServers || []) {
+    if (!server || !isMcpTransport(server.transport)) throw Object.assign(new Error("请选择有效的 MCP 传输方式。"), { status: 400 });
+    if (server.transport === "stdio" && !server.command?.trim()) throw Object.assign(new Error("stdio MCP 需要填写启动命令。"), { status: 400 });
+    if (server.transport !== "stdio" && !normalizeMcpUrl(server.url)) throw Object.assign(new Error("MCP 需要填写有效的 HTTP 或 HTTPS 地址。"), { status: 400 });
   }
 
   const provider = settings.provider || current.provider;
@@ -245,8 +323,21 @@ export async function writeSettings(project: Project, settings: Partial<ProjectS
   const merged: ProjectSettings = {
     ...current,
     ...settings,
+    ...(settings.localSearchProvider === "typesense" ? {
+      webSearchProvider: "typesense" as const,
+      webSearchUrl: settings.webSearchUrl || settings.typesenseUrl || current.webSearchUrl,
+      webSearchApiKey: settings.webSearchApiKey || settings.typesenseApiKey || current.webSearchApiKey,
+      webSearchCollection: settings.webSearchCollection || settings.typesenseCollection || current.webSearchCollection
+    } : {}),
     provider,
-    webSearchProvider: settings.webSearchProvider || current.webSearchProvider
+    ...(settings.localSearchProvider !== "typesense" ? { webSearchProvider: settings.webSearchProvider || current.webSearchProvider } : {}),
+    localSearchProvider: "builtin",
+    skills: normalizeSkills(settings.skills ?? current.skills),
+    mcpServers: normalizeMcpServers(settings.mcpServers ?? current.mcpServers),
+    modelProfiles:
+      settings.modelProfiles !== undefined
+        ? normalizeModelProfiles(settings.modelProfiles, undefined)
+        : current.modelProfiles
   };
 
   if (providerChanged) {
@@ -261,6 +352,33 @@ export async function writeSettings(project: Project, settings: Partial<ProjectS
     }
   }
 
+  if (settings.modelProfiles === undefined && legacyModelFieldsChanged(settings)) {
+    merged.modelProfiles = upsertLegacyModelProfile(merged.modelProfiles, {
+      id: merged.activeModelId,
+      provider: merged.provider,
+      model: merged.model,
+      baseUrl: merged.baseUrl,
+      apiKey: merged.apiKey
+    });
+  }
+
+  merged.activeModelId = resolveActiveModelId(settings.activeModelId ?? merged.activeModelId, merged.modelProfiles);
+  const activeModel = merged.activeModelId
+    ? merged.modelProfiles.find((profile) => profile.id === merged.activeModelId)
+    : undefined;
+  if (activeModel) {
+    merged.provider = activeModel.provider;
+    merged.model = activeModel.model;
+    merged.baseUrl = activeModel.baseUrl;
+    merged.apiKey = activeModel.apiKey;
+  } else if (settings.modelProfiles !== undefined) {
+    merged.provider = "offline";
+    merged.model = "";
+    merged.baseUrl = "";
+    merged.apiKey = undefined;
+  }
+
+  if (!merged.systemPrompt.trim()) merged.systemPrompt = DEFAULT_SYSTEM_PROMPT;
   await writeJson(settingsPath(project), merged);
   return merged;
 }
@@ -269,12 +387,220 @@ function isWebSearchProvider(value: unknown): value is ProjectSettings["webSearc
   return typeof value === "string" && WEB_SEARCH_PROVIDERS.has(value as ProjectSettings["webSearchProvider"]);
 }
 
+function normalizeModelProfiles(value: unknown, legacy: ModelProfile | undefined): ModelProfile[] {
+  if (!Array.isArray(value)) return legacy ? [legacy] : [];
+  const seen = new Set<string>();
+  return value.slice(0, maxSettingsModelProfiles).flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Partial<ModelProfile>;
+    const provider = isProviderKind(record.provider) ? record.provider : "custom";
+    const defaults = providerDefaults(provider);
+    const model = record.model === undefined ? defaults.model : cleanSettingText(record.model, 160);
+    const baseUrl = record.baseUrl === undefined ? defaults.baseUrl : cleanSettingText(record.baseUrl, 500);
+    const apiKey = cleanSettingText(record.apiKey, 2000) || undefined;
+    const name = readableTextOrFallback(
+      cleanSettingText(record.name, 80),
+      `${provider}${model ? ` / ${model}` : ""}`
+    );
+    const id = uniqueCapabilityId(record.id, name, seen);
+    return [
+      {
+        id,
+        name,
+        provider,
+        model,
+        baseUrl,
+        apiKey,
+        enabled: record.enabled !== false
+      }
+    ];
+  });
+}
+
+function legacyModelProfile(value: {
+  provider: ProjectSettings["provider"];
+  model: string;
+  baseUrl: string;
+  apiKey?: string;
+}): ModelProfile | undefined {
+  if (value.provider === "offline") return undefined;
+  if (!value.model && !value.baseUrl && !value.apiKey) return undefined;
+  const defaults = providerDefaults(value.provider);
+  const model = value.model || defaults.model;
+  const baseUrl = value.baseUrl || defaults.baseUrl;
+  return {
+    id: `model-${value.provider}`,
+    name: `默认模型 (${value.provider})`,
+    provider: value.provider,
+    model,
+    baseUrl,
+    apiKey: value.apiKey,
+    enabled: true
+  };
+}
+
+function resolveActiveModelId(value: unknown, profiles: ModelProfile[]): string | undefined {
+  const requested = cleanSettingText(value, 120);
+  const requestedProfile = requested ? profiles.find((profile) => profile.id === requested) : undefined;
+  if (requestedProfile && canUseModelProfile(requestedProfile)) return requestedProfile.id;
+  return profiles.find(canUseModelProfile)?.id;
+}
+
+function canUseModelProfile(profile: ModelProfile): boolean {
+  if (!profile.enabled || profile.provider === "offline") return false;
+  if (profile.provider === "ollama" || profile.provider === "custom") return Boolean(profile.baseUrl && profile.model);
+  return Boolean(profile.apiKey && profile.baseUrl && profile.model);
+}
+
+function legacyModelFieldsChanged(settings: Partial<ProjectSettings>): boolean {
+  return (
+    settings.provider !== undefined ||
+    settings.model !== undefined ||
+    settings.baseUrl !== undefined ||
+    settings.apiKey !== undefined
+  );
+}
+
+function upsertLegacyModelProfile(
+  profiles: ModelProfile[],
+  value: {
+    id?: string;
+    provider: ProjectSettings["provider"];
+    model: string;
+    baseUrl: string;
+    apiKey?: string;
+  }
+): ModelProfile[] {
+  const legacy = legacyModelProfile(value);
+  if (!legacy) return profiles;
+  const index = value.id ? profiles.findIndex((profile) => profile.id === value.id) : -1;
+  if (index >= 0) {
+    return profiles.map((profile, profileIndex) =>
+      profileIndex === index
+        ? { ...profile, ...legacy, id: profile.id, name: profile.name || legacy.name, enabled: profile.enabled !== false }
+        : profile
+    );
+  }
+  return normalizeModelProfiles([...profiles, legacy], undefined);
+}
+
+function normalizeSkills(value: unknown): SkillDefinition[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  return value.slice(0, maxSettingsSkills).flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Partial<SkillDefinition>;
+    const prompt = cleanSettingText(record.prompt, 12000);
+    if (!prompt) return [];
+    const name = readableTextOrFallback(cleanSettingText(record.name, 80), "未命名 Skill");
+    const id = uniqueCapabilityId(record.id, name, seen);
+    return [
+      {
+        id,
+        name,
+        prompt,
+        enabled: record.enabled !== false,
+        ...(cleanSettingText(record.description, 300) ? { description: cleanSettingText(record.description, 300) } : {}),
+        ...(normalizeStringList(record.tags, 12, 40).length ? { tags: normalizeStringList(record.tags, 12, 40) } : {})
+      }
+    ];
+  });
+}
+
+function normalizeMcpServers(value: unknown): McpServerConfig[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  return value.slice(0, maxSettingsMcpServers).flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Partial<McpServerConfig>;
+    const transport = isMcpTransport(record.transport) ? record.transport : "stdio";
+    const command = cleanSettingText(record.command, 300);
+    const url = normalizeMcpUrl(record.url);
+    if (transport === "stdio" && !command) return [];
+    if ((transport === "http" || transport === "sse") && !url) return [];
+    const name = readableTextOrFallback(cleanSettingText(record.name, 80), transport === "stdio" ? command : url);
+    const id = uniqueCapabilityId(record.id, name, seen);
+    const args = Array.isArray(record.args)
+      ? record.args.slice(0, 24).filter((item): item is string => typeof item === "string").map((item) => item.slice(0, 180))
+      : typeof record.args === "string" ? (record.args as string).split(/\r?\n/).filter(Boolean).slice(0, 24) : [];
+    const tools = normalizeStringList(record.tools, 2000, 128);
+    const resources = normalizeStringList(record.resources, 2000, 2048);
+    return [
+      {
+        id,
+        name,
+        transport,
+        enabled: record.enabled !== false,
+        ...(cleanSettingText(record.description, 400) ? { description: cleanSettingText(record.description, 400) } : {}),
+        ...(command ? { command } : {}),
+        ...(args.length ? { args } : {}),
+        ...(url ? { url } : {}),
+        ...(cleanSettingText(record.apiKey, 2000) ? { apiKey: cleanSettingText(record.apiKey, 2000) } : {}),
+        ...(tools.length ? { tools } : {}),
+        ...(resources.length ? { resources } : {})
+      }
+    ];
+  });
+}
+
+function isMcpTransport(value: unknown): value is McpServerConfig["transport"] {
+  return typeof value === "string" && MCP_TRANSPORTS.has(value as McpServerConfig["transport"]);
+}
+
+function normalizeMcpUrl(value: unknown): string {
+  const url = cleanSettingText(value, 500);
+  if (!url) return "";
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function normalizeStringList(value: unknown, limit: number, maxLength: number): string[] {
+  const raw = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(/[\n,，]/)
+      : [];
+  const seen = new Set<string>();
+  const items: string[] = [];
+  for (const item of raw) {
+    const text = cleanSettingText(item, maxLength);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    items.push(text);
+    if (items.length >= limit) break;
+  }
+  return items;
+}
+
+function uniqueCapabilityId(rawId: unknown, name: string, seen: Set<string>): string {
+  const rawBase = cleanSettingText(rawId, 80) || idFrom(name) || "capability";
+  const base = rawBase.replace(/[^\p{L}\p{N}_-]+/gu, "-").replace(/^-+|-+$/g, "") || "capability";
+  let id = base;
+  let index = 2;
+  while (seen.has(id)) {
+    id = `${base}-${index++}`;
+  }
+  seen.add(id);
+  return id;
+}
+
+function cleanSettingText(value: unknown, maxLength: number): string {
+  return String(value ?? "").replace(/\r\n?/g, "\n").trim().slice(0, maxLength);
+}
+
+function readPositiveInteger(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
 export async function initializeProject(project: Project): Promise<void> {
   const directories = [
     ".llm-wiki",
-    ".obsidian",
     "raw/assets",
-    "raw/converted",
     "raw/sources",
     "wiki/concepts",
     "wiki/entities",
@@ -287,82 +613,19 @@ export async function initializeProject(project: Project): Promise<void> {
     "chats"
   ];
 
-  await Promise.all(directories.map((dir) => fs.mkdir(path.join(project.root, dir), { recursive: true })));
+  // Shared parent directories must be created in order on Windows.
+  for (const dir of directories) await fs.mkdir(path.join(project.root, dir), { recursive: true });
   await writeJson(settingsPath(project), DEFAULT_SETTINGS);
   await writeJson(sourcesPath(project), []);
   await writeJson(queuePath(project), []);
 
   await writeText(
-    path.join(project.root, "purpose.md"),
-    `# ${project.name}\n\n${project.description || "描述这个知识库的用途、边界和目标读者。"}\n`
-  );
-  await writeText(
-    path.join(project.root, "schema.md"),
-    [
-      "---",
-      "title: Wiki Schema",
-      "type: schema",
-      "tags: [llm-wiki, schema]",
-      "---",
-      "# Wiki Schema",
-      "",
-      "- `wiki/sources/`: 每个原始材料对应一个可引用来源页。",
-      "- `wiki/sources/converted/`: Word、PDF、表格、演示文稿等转换后的 Markdown 全文。",
-      "- `wiki/concepts/`: 可复用概念页，聚合多个来源的定义与证据。",
-      "- `wiki/entities/`: 人、组织、产品、论文、项目等实体页。",
-      "- `wiki/queries/`: 被保存的问答与推理路径。",
-      "- `wiki/research/`: 深度研究任务与检索结果。",
-      "- `wiki/synthesis/`: 跨来源综合结论。",
-      "- `wiki/comparisons/`: 对比、取舍、争议点。"
-    ].join("\n")
-  );
-  await writeText(
     path.join(project.root, "wiki/index.md"),
-    [
-      "---",
-      `title: ${project.name}`,
-      "type: index",
-      "tags: [index]",
-      "sources: []",
-      "---",
+    serializeMarkdown({ title: project.name, type: "index", tags: ["index"], sources: [] }, [
       `# ${project.name}`,
       "",
-      "## 快速入口",
-      "",
-      "- [[overview|知识库总览]]",
-      "- [[log|摄入日志]]",
-      "",
-      "## 最近概念",
-      "",
-      "_摄入材料后会自动更新。_"
-    ].join("\n")
-  );
-  await writeText(
-    path.join(project.root, "wiki/overview.md"),
-    [
-      "---",
-      "title: 知识库总览",
-      "type: synthesis",
-      "tags: [overview]",
-      "sources: []",
-      "---",
-      "# 知识库总览",
-      "",
-      "这里会汇总已摄入来源的主题、概念和后续核对事项。"
-    ].join("\n")
-  );
-  await writeText(
-    path.join(project.root, "wiki/log.md"),
-    [
-      "---",
-      "title: 摄入日志",
-      "type: log",
-      "tags: [log]",
-      "sources: []",
-      "---",
-      "# 摄入日志",
-      ""
-    ].join("\n")
+      project.description ? project.description : "_上传或添加来源后，知识库会自动生成来源页、概念页、总览和摄入日志。_"
+    ].join("\n"))
   );
 }
 

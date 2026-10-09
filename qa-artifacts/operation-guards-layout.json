@@ -1,0 +1,233 @@
+[
+  {
+    "view": "Wiki",
+    "width": 1440,
+    "height": 1000,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "wiki/index.md"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "文件",
+    "width": 1440,
+    "height": 1000,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "文件"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "来源",
+    "width": 1440,
+    "height": 1000,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "来源"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "查询",
+    "width": 1440,
+    "height": 1000,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "新会话"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "图谱",
+    "width": 1440,
+    "height": 1000,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "图谱"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "体检",
+    "width": 1440,
+    "height": 1000,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "体检"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "设置",
+    "width": 1440,
+    "height": 1000,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "设置"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "Wiki",
+    "width": 805,
+    "height": 900,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "wiki/index.md"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "文件",
+    "width": 805,
+    "height": 900,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "文件"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "来源",
+    "width": 805,
+    "height": 900,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "来源"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "查询",
+    "width": 805,
+    "height": 900,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "新会话"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "图谱",
+    "width": 805,
+    "height": 900,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "图谱"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "体检",
+    "width": 805,
+    "height": 900,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "体检"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "设置",
+    "width": 805,
+    "height": 900,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "设置"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "Wiki",
+    "width": 375,
+    "height": 844,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "wiki/index.md"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "文件",
+    "width": 375,
+    "height": 844,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "文件"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "来源",
+    "width": 375,
+    "height": 844,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "来源"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "查询",
+    "width": 375,
+    "height": 844,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "新会话"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "图谱",
+    "width": 375,
+    "height": 844,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "图谱"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "体检",
+    "width": 375,
+    "height": 844,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "体检"
+    ],
+    "outsideControls": 0
+  },
+  {
+    "view": "设置",
+    "width": 375,
+    "height": 844,
+    "damagedText": false,
+    "horizontalOverflow": 0,
+    "mainHeadings": [
+      "设置"
+    ],
+    "outsideControls": 0
+  }
+]

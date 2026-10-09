@@ -38,7 +38,9 @@
       #status {
         color: #64716b;
         margin-top: 10px;
+        overflow-wrap: anywhere;
       }
+      button:disabled { opacity: 0.6; cursor: wait; }
     </style>
   </head>
   <body>
@@ -47,15 +49,15 @@
       <input id="baseUrl" value="http://localhost:19827" />
     </label>
     <label>
-      Project ID
-      <input id="projectId" placeholder="从 Web 项目 URL 或 API 中复制" />
+      知识库 ID
+      <input id="projectId" placeholder="从 Web 左侧知识库 ID 或 API 中复制" />
     </label>
     <label>
       API Token（可选）
       <input id="apiToken" type="password" placeholder="启用 LLM_WIKI_API_TOKEN 时填写" />
     </label>
     <button id="clip">发送当前页面</button>
-    <div id="status"></div>
+    <div id="status" role="status" aria-live="polite"></div>
     <script src="popup.js"></script>
   </body>
 </html>

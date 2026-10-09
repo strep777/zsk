@@ -1,4 +1,4 @@
-﻿# LLM Wiki Web 的 Docker Compose 部署配置。
+# LLM Wiki Web 的 Docker Compose 部署配置。
 # 适用于 Ubuntu + Docker Compose + 25000+ 法律文档 ZIP/Office/PDF 批量上传。
 
 services:
@@ -64,8 +64,8 @@ services:
       # 新版浏览器上传已经统一走分片接口，这里主要给旧客户端/脚本兜底。
       LLM_WIKI_MAX_UPLOAD_FILES: "30000"
 
-      # 兼容旧 multipart 上传接口的单文件大小上限，单位 MB。
-      # 新版浏览器上传受 LLM_WIKI_UPLOAD_CHUNK_MB 控制，不再一次性提交大请求体。
+      # multipart 和分片上传的单文件总大小上限，单位 MB。
+      # 浏览器每个分片另受 LLM_WIKI_UPLOAD_CHUNK_MB 控制。
       LLM_WIKI_MAX_UPLOAD_SIZE_MB: "10240"
 
       # Node HTTP 请求超时，单位毫秒；0 表示禁用，适合大文件分片上传。
@@ -73,10 +73,6 @@ services:
 
       # Node socket 空闲超时，单位毫秒；0 表示禁用，避免慢速上传被 Node 主动断开。
       LLM_WIKI_SOCKET_TIMEOUT_MS: "0"
-
-      # 摄入队列每处理多少个文件写一次进度。
-      # 20 比默认 50 更容易看到进度变化，适合 25000+ 文档导入。
-      LLM_WIKI_QUEUE_FLUSH_INTERVAL: "20"
 
       # 单个概念/实体页面最多沉淀的来源笔记数量。
       # 过大容易让单个 Markdown 页面和预览卡顿，这里给大法律库留足空间但不无限放开。
@@ -105,9 +101,6 @@ services:
       # 文件树/图谱读取 Markdown 头部元数据的上限，单位 bytes。
       LLM_WIKI_METADATA_BYTES: "262144"
 
-      # 问答时最多扫描多少个 Wiki Markdown 正文；来源标题/摘要仍会通过 registry 快速匹配。
-      LLM_WIKI_MAX_SEARCH_FILES: "4000"
-
       # Lint 手动检查时最多扫描多少个 Wiki Markdown 页面，避免 25000+ 页面一次性全量卡住。
       LLM_WIKI_MAX_LINT_FILES: "2500"
 
@@ -124,6 +117,10 @@ services:
       LLM_WIKI_MAX_CHAT_ATTACHMENTS: "6"
       LLM_WIKI_MAX_CHAT_ATTACHMENT_TEXT_BYTES: "24000"
       LLM_WIKI_MAX_CHAT_ATTACHMENT_DATA_URL_BYTES: "6291456"
+
+      # 查询对话扩展能力数量限制。MCP 服务器当前作为能力目录登记，不会自动执行本地命令。
+      LLM_WIKI_MAX_SKILLS: "24"
+      LLM_WIKI_MAX_MCP_SERVERS: "16"
 
       # 浏览器分片上传时，服务端临时文件名的 UTF-8 字节上限。
       # 单个超长中文文件名/ZIP 名会自动截断并保留 hash，避免临时路径 File name too long。

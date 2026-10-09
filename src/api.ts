@@ -7,6 +7,7 @@ import {
   Project,
   ProjectSettings,
   QueueItem,
+  ResearchTask,
   SearchHit,
   SourceRecord,
   WikiFile
@@ -14,6 +15,10 @@ import {
 
 const API_BASE = "/api/v1";
 const DEFAULT_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+
+function projectPath(projectId: string, suffix = ""): string {
+  return `/projects/${encodeURIComponent(projectId)}${suffix}`;
+}
 
 export interface UploadSourcesResult {
   async?: boolean;
@@ -49,8 +54,8 @@ export interface UploadOptions {
   onProgress?: (progress: UploadProgress) => void;
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  return request<T>(path, { method: "GET" });
+export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
+  return request<T>(path, { method: "GET", signal });
 }
 
 export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
@@ -69,6 +74,16 @@ export async function apiDelete<T>(path: string): Promise<T> {
   return request<T>(path, { method: "DELETE" });
 }
 
+export class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function request<T>(path: string, init: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -78,28 +93,45 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
     }
   });
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(payload.error || response.statusText);
+    notifyAuthenticationRequired(response.status);
+    throw await responseError(response);
   }
   return (await response.json()) as T;
 }
 
+async function responseError(response: Response): Promise<ApiError> {
+  const payload: unknown = await response.json().catch(() => undefined);
+  const detail = typeof payload === "string" ? payload : payload && typeof payload === "object" && "error" in payload ? payload.error : undefined;
+  const message = typeof detail === "string" ? detail.trim() : "";
+  const statusText = response.statusText.trim();
+  return new ApiError(response.status, message || `请求失败（HTTP ${response.status}${statusText ? ` ${statusText}` : ""}）。`);
+}
+
 export const api = {
+  extractAttachment: (projectId: string, file: File) => request<{ text: string; warnings: string[] }>(
+    `${projectPath(projectId, "/attachments/extract")}?fileName=${encodeURIComponent(file.name)}`,
+    { method: "POST", body: file, headers: { "content-type": "application/octet-stream" } }
+  ),
+  authenticate: (token: string) => request<{ ok: true }>("/session", { method: "POST", headers: { "x-api-token": token } }),
   projects: () => apiGet<{ projects: Project[] }>("/projects"),
   createProject: (body: { name: string; description?: string }) =>
     apiPost<{ project: Project }>("/projects", body),
-  wikiFiles: (projectId: string, options: { limit?: number; offset?: number; query?: string } = {}) => {
+  wikiFiles: (
+    projectId: string,
+    options: { limit?: number; offset?: number; query?: string; includeTotal?: boolean; signal?: AbortSignal } = {}
+  ) => {
     const params = new URLSearchParams({ scope: "wiki" });
     if (options.limit) params.set("limit", String(options.limit));
     if (options.offset) params.set("offset", String(options.offset));
     if (options.query) params.set("query", options.query);
-    return apiGet<{ files: WikiFile[]; total?: number; offset?: number; limit?: number }>(
-      `/projects/${projectId}/files?${params}`
+    if (options.includeTotal) params.set("includeTotal", "1");
+    return apiGet<{ files: WikiFile[]; total?: number; offset?: number; limit?: number; limited?: boolean }>(
+      `${projectPath(projectId, "/files")}?${params}`, options.signal
     );
   },
   rawFiles: (
     projectId: string,
-    options: { limit?: number; offset?: number; query?: string; compact?: boolean } = {}
+    options: { limit?: number; offset?: number; query?: string; compact?: boolean; signal?: AbortSignal } = {}
   ) => {
     const params = new URLSearchParams({ scope: "raw" });
     params.set("limit", String(options.limit ?? 500));
@@ -107,18 +139,18 @@ export const api = {
     if (options.query) params.set("query", options.query);
     if (options.compact ?? true) params.set("compact", "1");
     return apiGet<{ files: SourceRecord[]; total?: number; offset?: number; limit?: number }>(
-      `/projects/${projectId}/files?${params}`
+      `${projectPath(projectId, "/files")}?${params}`, options.signal
     );
   },
-  fileContent: (projectId: string, filePath: string) =>
+  fileContent: (projectId: string, filePath: string, signal?: AbortSignal) =>
     apiGet<{ path: string; content: string }>(
-      `/projects/${projectId}/files/content?path=${encodeURIComponent(filePath)}`
+      `${projectPath(projectId, "/files/content")}?path=${encodeURIComponent(filePath)}`, signal
     ),
   saveFile: (projectId: string, path: string, content: string) =>
-    apiPut<{ ok: true }>(`/projects/${projectId}/files/content`, { path, content }),
+    apiPut<{ ok: true }>(projectPath(projectId, "/files/content"), { path, content }),
   uploadSources: async (projectId: string, files: FileList | File[], options: UploadOptions = {}) => {
     const selected = Array.from(files);
-    const chunkBytes = options.chunkBytes ?? DEFAULT_UPLOAD_CHUNK_BYTES;
+    const chunkBytes = normalizeUploadChunkBytes(options.chunkBytes);
     const taskCount = selected.length;
     const totalBytes = selected.reduce((sum, file) => sum + file.size, 0);
     let uploadedFiles = 0;
@@ -128,6 +160,7 @@ export const api = {
     for (const file of selected) {
       await waitForUploadSlot(options);
       const currentTask = uploadedFiles + 1;
+      const totalChunks = Math.max(1, Math.ceil(file.size / chunkBytes));
       const chunkResult = await uploadFileInChunks(projectId, file, chunkBytes, options, (fileUploadedBytes, detail, chunk) => {
         options.onProgress?.({
           batchIndex: currentTask,
@@ -155,6 +188,8 @@ export const api = {
         queued: result.queued,
         skipped: result.skipped,
         fileName: file.name,
+        currentChunk: totalChunks,
+        totalChunks,
         uploadedBytes,
         totalBytes,
         detail: `${file.name} 上传完成`
@@ -168,48 +203,75 @@ export const api = {
         queued: 0,
         skipped: 0,
         archives: [],
-        activity: { queue: [], sources: [], queueTotal: 0, sourceTotal: 0, sourceBytesTotal: 0 }
+        activity: {
+          queue: [],
+          sources: [],
+          queueTotal: 0,
+          sourceTotal: 0,
+          sourceBytesTotal: 0,
+          queueStats: { total: 0, queued: 0, running: 0, done: 0, failed: 0 },
+          sourceStats: { total: 0, queued: 0, ingesting: 0, ready: 0, skipped: 0, failed: 0 }
+        }
       }
     );
   },
   clip: (projectId: string, body: { title: string; url?: string; content: string }) =>
-    apiPost<{ source: SourceRecord }>(`/projects/${projectId}/sources/clip`, body),
-  rescan: (projectId: string) => apiPost<{ queued: number; total: number }>(`/projects/${projectId}/sources/rescan`),
+    apiPost<{ source: SourceRecord }>(projectPath(projectId, "/sources/clip"), body),
+  rescan: (projectId: string) => apiPost<{ queued: number; total: number }>(projectPath(projectId, "/sources/rescan")),
+  resumeQueue: (projectId: string) => apiPost<{ ok: true }>(projectPath(projectId, "/queue/resume")),
   deleteSource: (projectId: string, sourceId: string) =>
     apiDelete<{ sources: SourceRecord[]; total: number; queueTotal?: number; deleted: boolean }>(
-      `/projects/${projectId}/sources/${encodeURIComponent(sourceId)}`
+      projectPath(projectId, `/sources/${encodeURIComponent(sourceId)}`)
     ),
-  activity: (projectId: string, options: { sourceLimit?: number; queueLimit?: number; compact?: boolean } = {}) => {
+  activity: (projectId: string, options: { sourceLimit?: number; queueLimit?: number; compact?: boolean; signal?: AbortSignal } = {}) => {
     const params = new URLSearchParams();
     if (options.sourceLimit) params.set("sourceLimit", String(options.sourceLimit));
     if (options.queueLimit) params.set("queueLimit", String(options.queueLimit));
     if (options.compact ?? true) params.set("compact", "1");
     const suffix = params.size ? `?${params}` : "";
-    return apiGet<ActivitySnapshot>(`/projects/${projectId}/activity${suffix}`);
+    return apiGet<ActivitySnapshot>(projectPath(projectId, `/activity${suffix}`), options.signal);
   },
   search: (projectId: string, query: string) =>
-    apiPost<{ hits: SearchHit[] }>(`/projects/${projectId}/search`, { query }),
+    apiPost<{ hits: SearchHit[] }>(projectPath(projectId, "/search"), { query }),
   chat: (
     projectId: string,
-    body: { query: string; chatId?: string; save?: boolean; attachments?: ChatAttachment[]; useHistory?: boolean }
+    body: {
+      query: string;
+      chatId?: string;
+      save?: boolean;
+      attachments?: ChatAttachment[];
+      useHistory?: boolean;
+      webSearch?: boolean;
+      modelId?: string;
+    }
   ) =>
     apiPost<{ answer: string; hits: SearchHit[]; chat: ChatSession; savedPath?: string }>(
-      `/projects/${projectId}/chat`,
+      projectPath(projectId, "/chat"),
       body
     ),
   saveChatAnswer: (projectId: string, chatId: string) =>
-    apiPost<{ savedPath: string }>(`/projects/${projectId}/chats/${encodeURIComponent(chatId)}/save`),
-  graph: (projectId: string) => apiGet<KnowledgeGraph>(`/projects/${projectId}/graph`),
+    apiPost<{ savedPath: string }>(projectPath(projectId, `/chats/${encodeURIComponent(chatId)}/save`)),
+  deleteChat: (projectId: string, chatId: string) =>
+    apiDelete<{ deleted: boolean }>(projectPath(projectId, `/chats/${encodeURIComponent(chatId)}`)),
+  graph: (projectId: string) => apiGet<KnowledgeGraph>(projectPath(projectId, "/graph")),
   lint: (projectId: string, options: { limit?: number } = {}) => {
     const suffix = options.limit ? `?limit=${encodeURIComponent(String(options.limit))}` : "";
-    return apiPost<{ issues: LintIssue[] }>(`/projects/${projectId}/lint${suffix}`, options);
+    return apiPost<{ issues: LintIssue[] }>(projectPath(projectId, `/lint${suffix}`), options);
   },
-  research: (projectId: string, body: { topic: string; queries?: string[] }) =>
-    apiPost<{ path: string; markdown: string; queries: string[] }>(`/projects/${projectId}/research`, body),
-  settings: (projectId: string) => apiGet<{ settings: ProjectSettings }>(`/projects/${projectId}/settings`),
+  research: (projectId: string, body: { topic: string; queries?: string[]; modelId?: string }) =>
+    apiPost<{ task: ResearchTask }>(projectPath(projectId, "/research"), body),
+  researchTasks: (projectId: string) =>
+    apiGet<{ tasks: ResearchTask[] }>(projectPath(projectId, "/research")),
+  researchTask: (projectId: string, taskId: string) =>
+    apiGet<{ task: ResearchTask }>(projectPath(projectId, `/research/${encodeURIComponent(taskId)}`)),
+  deleteResearchTask: (projectId: string, taskId: string) =>
+    apiDelete<{ deleted: boolean }>(projectPath(projectId, `/research/${encodeURIComponent(taskId)}`)),
+  settings: (projectId: string) => apiGet<{ settings: ProjectSettings }>(projectPath(projectId, "/settings")),
   saveSettings: (projectId: string, body: Partial<ProjectSettings>) =>
-    apiPut<{ settings: ProjectSettings }>(`/projects/${projectId}/settings`, body),
-  chats: (projectId: string) => apiGet<{ chats: ChatSession[] }>(`/projects/${projectId}/chats`)
+    apiPut<{ settings: ProjectSettings }>(projectPath(projectId, "/settings"), body),
+  diagnoseSettings: (projectId: string, action: string, body: unknown) =>
+    apiPost<{ message: string; name?: string; latencyMs?: number; response?: string; models?: string[]; collections?: string[]; collection?: string; queryBy?: string; tools?: string[]; resources?: string[]; indexed?: number; updated?: number; deleted?: number }>(projectPath(projectId, `/settings/diagnostics/${encodeURIComponent(action)}`), body),
+  chats: (projectId: string) => apiGet<{ chats: ChatSession[] }>(projectPath(projectId, "/chats"))
 };
 
 async function uploadFileInChunks(
@@ -221,8 +283,8 @@ async function uploadFileInChunks(
 ): Promise<UploadSourcesResult> {
   const uploadId = createUploadId();
   const totalChunks = Math.max(1, Math.ceil(file.size / chunkBytes));
-  let latestResponse: {
-    activity?: { queue: QueueItem[]; sources: SourceRecord[] };
+  let latestResponse: Partial<UploadSourcesResult> & {
+    activity?: ActivitySnapshot;
     message?: string;
   } | null = null;
 
@@ -241,7 +303,8 @@ async function uploadFileInChunks(
         fileSize: String(file.size),
         chunkSize: String(chunk.size)
       });
-      const response = await fetch(`${API_BASE}/projects/${projectId}/sources/upload-chunk?${params}`, {
+      params.set("deferRefresh", "1");
+      const response = await fetch(`${API_BASE}${projectPath(projectId, "/sources/upload-chunk")}?${params}`, {
         method: "PUT",
         headers: {
           "content-type": "application/octet-stream"
@@ -250,38 +313,78 @@ async function uploadFileInChunks(
         signal: options.signal
       });
       if (!response.ok) {
-        const payload = await response.json().catch(() => ({ error: response.statusText }));
-        throw new Error(payload.error || response.statusText || "Upload failed");
+        notifyAuthenticationRequired(response.status);
+        throw await responseError(response);
       }
-      latestResponse = await response.json();
+      let payload: unknown;
+      try { payload = await response.json(); }
+      catch { throw new ApiError(502, "上传服务返回的内容不是有效的 JSON，请检查服务器或代理配置。"); }
+      assertUploadActive(options);
+      if (!payload || typeof payload !== "object" || !("done" in payload) || typeof payload.done !== "boolean") {
+        throw new ApiError(502, "服务未返回有效的上传分片确认，请重新上传。");
+      }
+      if (payload.done !== (index === totalChunks - 1)) {
+        throw new ApiError(502, "服务返回的上传分片状态与当前进度不一致，无法确认上传完成，请重新上传。");
+      }
+      latestResponse = payload as Partial<UploadSourcesResult>;
       onProgress?.(end, `${file.name}：分片 ${index + 1}/${totalChunks}`, {
         current: index + 1,
         total: totalChunks
       });
+      assertUploadActive(options);
     }
   } catch (error) {
-    if (isAbortLike(error) || options.isCancelled?.()) {
-      await cleanupUploadSession(projectId, uploadId).catch(() => undefined);
-    }
+    await cleanupUploadSession(projectId, uploadId).catch(() => undefined);
     throw error;
   }
 
   return {
-    async: true,
-    message: latestResponse?.message || "文件已上传，后台正在解包并登记到摄入队列。",
-    sources: [],
-    total: 1,
-    queued: 0,
-    skipped: 0,
-    archives: [],
-    activity: latestResponse?.activity || { queue: [], sources: [], queueTotal: 0, sourceTotal: 0, sourceBytesTotal: 0 }
+    async: Boolean(latestResponse?.async),
+    message: latestResponse?.message || "文件已上传，已自动加入摄入队列。",
+    sources: latestResponse?.sources || [],
+    total: latestResponse?.total ?? 1,
+    queued: latestResponse?.queued ?? 0,
+    skipped: latestResponse?.skipped ?? 0,
+    archives: latestResponse?.archives || [],
+    activity:
+      latestResponse?.activity || {
+        queue: [],
+        sources: [],
+        queueTotal: 0,
+        sourceTotal: 0,
+        sourceBytesTotal: 0,
+        queueStats: { total: 0, queued: 0, running: 0, done: 0, failed: 0 },
+        sourceStats: { total: 0, queued: 0, ingesting: 0, ready: 0, skipped: 0, failed: 0 }
+      }
   };
 }
 
 async function waitForUploadSlot(options: UploadOptions): Promise<void> {
+  assertUploadActive(options);
+  const pause = options.waitWhilePaused?.();
+  const signal = options.signal;
+  if (pause && signal) {
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => { signal.removeEventListener("abort", abort); reject(uploadCancelledError()); };
+      signal.addEventListener("abort", abort, { once: true });
+      pause.then(
+        () => { signal.removeEventListener("abort", abort); resolve(); },
+        (error) => { signal.removeEventListener("abort", abort); reject(error); }
+      );
+      if (signal.aborted) abort();
+    });
+  } else {
+    await pause;
+  }
+  assertUploadActive(options);
+}
+
+function assertUploadActive(options: UploadOptions): void {
   if (options.signal?.aborted || options.isCancelled?.()) throw uploadCancelledError();
-  await options.waitWhilePaused?.();
-  if (options.signal?.aborted || options.isCancelled?.()) throw uploadCancelledError();
+}
+
+function notifyAuthenticationRequired(status: number) {
+  if (status === 401 && typeof window !== "undefined") window.dispatchEvent(new Event("llmwiki-auth-required"));
 }
 
 function uploadCancelledError(): Error {
@@ -290,13 +393,25 @@ function uploadCancelledError(): Error {
   return error;
 }
 
-function isAbortLike(error: unknown): boolean {
-  return error instanceof Error && (error.name === "AbortError" || /aborted|abort|取消/.test(error.message));
+function normalizeUploadChunkBytes(value: number | undefined): number {
+  return Number.isFinite(value) && value && value >= 1 ? Math.floor(value) : DEFAULT_UPLOAD_CHUNK_BYTES;
 }
 
 async function cleanupUploadSession(projectId: string, uploadId: string): Promise<void> {
   const params = new URLSearchParams({ uploadId });
-  await fetch(`${API_BASE}/projects/${projectId}/sources/upload-session?${params}`, { method: "DELETE" });
+  const controller = new AbortController();
+  let timer!: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => { controller.abort(); reject(new Error("清理上传会话超时。")); }, 15000);
+  });
+  try {
+    await Promise.race([
+      fetch(`${API_BASE}${projectPath(projectId, "/sources/upload-session")}?${params}`, { method: "DELETE", signal: controller.signal }),
+      timeout
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function mergeUploadResults(current: UploadSourcesResult | null, next: UploadSourcesResult): UploadSourcesResult {

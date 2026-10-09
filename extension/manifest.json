@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "LLM Wiki Web Clipper",
+  "name": "LLM Wiki 网页剪藏",
   "version": "0.1.0",
-  "description": "Send the current page to a local LLM Wiki Web project.",
+  "description": "把当前网页发送到本地 LLM Wiki 知识库。",
   "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": [
     "http://localhost:19827/*",

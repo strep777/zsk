@@ -1,0 +1,26 @@
+[
+  {
+    "width": 1440,
+    "height": 1000,
+    "garbled": false,
+    "overflowControls": [],
+    "pageScrollWidth": 1440,
+    "pageWidth": 1440
+  },
+  {
+    "width": 820,
+    "height": 900,
+    "garbled": false,
+    "overflowControls": [],
+    "pageScrollWidth": 805,
+    "pageWidth": 805
+  },
+  {
+    "width": 390,
+    "height": 844,
+    "garbled": false,
+    "overflowControls": [],
+    "pageScrollWidth": 375,
+    "pageWidth": 375
+  }
+]

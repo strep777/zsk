@@ -25,6 +25,7 @@ export interface ExtractOptions {
 }
 
 export interface ExtractedDocument {
+  metadataOnly?: boolean;
   title: string;
   text: string;
   markdown: string;
@@ -54,6 +55,28 @@ const PRESENTATION_EXTENSIONS = new Set([".ppt", ".pptx"]);
 const SPREADSHEET_EXTENSIONS = new Set([".xls", ".xlsx", ".csv", ".tsv"]);
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"]);
 
+const LEGAL_TEXT_TERMS = [
+  "人民",
+  "政府",
+  "法院",
+  "条例",
+  "规定",
+  "办法",
+  "决定",
+  "法律",
+  "法规",
+  "管理",
+  "实施",
+  "委员会",
+  "代表大会",
+  "公司章程",
+  "股东出资"
+] as const;
+
+const CJK_MOJIBAKE_TERMS = Array.from(
+  new Set(LEGAL_TEXT_TERMS.map((term) => iconv.decode(Buffer.from(term, "utf8"), "gbk")).filter(Boolean))
+);
+
 export function sourceKind(filePath: string): string {
   const ext = path.extname(filePath).toLowerCase();
   if ([".md", ".markdown"].includes(ext)) return "markdown";
@@ -75,13 +98,17 @@ export async function extractDocument(filePath: string, options: ExtractOptions 
 
   if (TEXT_EXTENSIONS.has(ext)) {
     const text = cleanupTextByKind(await readTextSourceFile(filePath, warnings), ext);
+    if (!text.trim()) {
+      warnings.push("文件没有可读取正文，请检查内容后重新上传。");
+      return { ...packDocument(fallbackTitle, textToMarkdown("", fallbackTitle), sourceKind(filePath), [], warnings), metadataOnly: true };
+    }
     const markdown = ext === ".md" || ext === ".markdown" ? text : textToMarkdown(text, fallbackTitle);
     return packDocument(titleFromText(markdown, fallbackTitle), markdown, sourceKind(filePath), assets, warnings);
   }
 
   if (ext === ".pdf") {
     const result = await extractPdfMarkdown(filePath, options);
-    return packDocument(fallbackTitle, result.markdown, "pdf", result.assets, result.warnings);
+    return { ...packDocument(fallbackTitle, result.markdown, "pdf", result.assets, result.warnings), metadataOnly: result.metadataOnly };
   }
 
   if (ext === ".docx") {
@@ -179,7 +206,7 @@ async function metadataOnly(
   warnings.push(reason);
   const title = safeFallbackTitle(path.basename(filePath, path.extname(filePath)));
   const markdown = [`# ${title}`, "", await fileMetadata(filePath), "", `> ${reason}`].join("\n");
-  return packDocument(title, markdown, kind, [], warnings);
+  return { ...packDocument(title, markdown, kind, [], warnings), metadataOnly: true };
 }
 
 async function fileMetadata(filePath: string): Promise<string> {
@@ -188,6 +215,7 @@ async function fileMetadata(filePath: string): Promise<string> {
 }
 
 function cleanupTextByKind(input: string, ext: string): string {
+  if (ext === ".md" || ext === ".markdown") return input.replace(/\r\n?/g, "\n");
   if ([".html", ".htm", ".xml"].includes(ext)) {
     return normalizeText(
       input
@@ -237,18 +265,81 @@ function isLikelyTitleLine(input: string): boolean {
   return /[\p{Script=Han}A-Za-z]/u.test(input);
 }
 
-async function readTextSourceFile(filePath: string, warnings: string[]): Promise<string> {
+export async function readTextSourceFile(filePath: string, warnings: string[] = []): Promise<string> {
   const buffer = await fs.readFile(filePath);
-  if (isUtf8(buffer)) return stripBom(buffer.toString("utf8"));
-
-  const candidates = [
-    { label: "gb18030", text: iconv.decode(buffer, "gb18030") },
-    { label: "big5", text: iconv.decode(buffer, "big5") },
-    { label: "utf8", text: buffer.toString("utf8") }
-  ].map((candidate) => ({ ...candidate, score: scoreDecodedText(candidate.text) }));
-  const best = candidates.sort((a, b) => b.score - a.score)[0];
-  if (best.label !== "utf8") warnings.push(`文本文件不是 UTF-8，已按 ${best.label.toUpperCase()} 解码。`);
+  const best = chooseDecodedText(buffer);
+  if (best.warning) warnings.push(best.warning);
   return stripBom(best.text);
+}
+
+type DecodedTextCandidate = {
+  label: string;
+  text: string;
+  score: number;
+  warning?: string;
+};
+
+function chooseDecodedText(buffer: Buffer): DecodedTextCandidate {
+  if (buffer.length >= 2 && ((buffer[0] === 0xff && buffer[1] === 0xfe) || (buffer[0] === 0xfe && buffer[1] === 0xff))) {
+    const encoding = buffer[0] === 0xff ? "utf16le" : "utf16be";
+    return { label: encoding, text: iconv.decode(buffer, encoding), score: 0, warning: "文本文件已按 UTF-16 解码。" };
+  }
+  const utf8Text = buffer.toString("utf8");
+  const baseCandidates: Array<Omit<DecodedTextCandidate, "score">> = isUtf8(buffer)
+    ? [{ label: "utf8", text: utf8Text }]
+    : [
+        { label: "gb18030", text: iconv.decode(buffer, "gb18030"), warning: "文本文件不是 UTF-8，已按 GB18030 解码。" },
+        { label: "big5", text: iconv.decode(buffer, "big5"), warning: "文本文件不是 UTF-8，已按 BIG5 解码。" },
+        { label: "utf8", text: utf8Text, warning: "文本文件不是 UTF-8，已按 UTF-8 强制解码。" }
+      ];
+
+  const candidates: Array<Omit<DecodedTextCandidate, "score">> = [];
+  const seen = new Set<string>();
+  const addCandidate = (candidate: Omit<DecodedTextCandidate, "score">): void => {
+    if (!candidate.text || seen.has(candidate.text)) return;
+    seen.add(candidate.text);
+    candidates.push(candidate);
+  };
+
+  for (const candidate of baseCandidates) {
+    addCandidate(candidate);
+    for (const repaired of repairDecodedTextCandidates(candidate.text)) {
+      addCandidate({
+        label: `${candidate.label}+${repaired.label}`,
+        text: repaired.text,
+        warning: candidate.warning
+          ? `${candidate.warning} 文本内容疑似发生过编码错读，已自动修复。`
+          : "文本内容疑似发生过编码错读，已自动修复为 UTF-8 中文。"
+      });
+    }
+  }
+
+  if (!candidates.length) {
+    return { label: "utf8", text: utf8Text, score: 0 };
+  }
+
+  return candidates
+    .map((candidate) => ({ ...candidate, score: scoreDecodedText(candidate.text) }))
+    .sort((a, b) => b.score - a.score)[0];
+}
+
+function repairDecodedTextCandidates(value: string): Array<{ label: string; text: string }> {
+  const candidates: Array<{ label: string; text: string }> = [];
+  const add = (label: string, text: string): void => {
+    if (text && text !== value && !candidates.some((candidate) => candidate.text === text)) {
+      candidates.push({ label, text });
+    }
+  };
+
+  add("gbk-mojibake", normalizeRepairedMojibakeText(iconv.encode(value, "gbk").toString("utf8")));
+  add("gb18030-mojibake", normalizeRepairedMojibakeText(iconv.encode(value, "gb18030").toString("utf8")));
+  add("big5-mojibake", normalizeRepairedMojibakeText(iconv.encode(value, "big5").toString("utf8")));
+  add("latin1-mojibake", normalizeRepairedMojibakeText(Buffer.from(value, "latin1").toString("utf8")));
+  return candidates;
+}
+
+function normalizeRepairedMojibakeText(value: string): string {
+  return value.replace(/\uFFFD\?/g, "。").replace(/\uFFFD+/g, "");
 }
 
 function scoreDecodedText(value: string): number {
@@ -256,9 +347,32 @@ function scoreDecodedText(value: string): number {
   const ascii = [...value.matchAll(/[A-Za-z0-9]/g)].length;
   const replacement = [...value.matchAll(/\uFFFD/g)].length;
   const questionRuns = [...value.matchAll(/\?{3,}/g)].reduce((sum, match) => sum + match[0].length, 0);
-  const mojibake = [...value.matchAll(/[ÃÂÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝ]/g)].length;
-  const legalTerms = [...value.matchAll(/人民|政府|法院|条例|规定|办法|决定|法律|法规|管理|实施|委员会|代表大会/gu)].length;
-  return han * 4 + ascii * 0.2 + legalTerms * 12 - replacement * 30 - questionRuns * 4 - mojibake * 4;
+  const privateUse = [...value.matchAll(/[\uE000-\uF8FF]/g)].length;
+  const latinMojibake = [...value.matchAll(/[\u00C2-\u00D6\u00D8-\u00DD\u00E2\u20AC]/g)].length;
+  const cjkMojibakeTerms = countTermOccurrences(value, CJK_MOJIBAKE_TERMS);
+  const legalTerms = countTermOccurrences(value, LEGAL_TEXT_TERMS);
+  return (
+    han * 4 +
+    ascii * 0.2 +
+    legalTerms * 12 -
+    replacement * 30 -
+    questionRuns * 4 -
+    privateUse * 20 -
+    latinMojibake * 8 -
+    cjkMojibakeTerms * 30
+  );
+}
+
+function countTermOccurrences(value: string, terms: readonly string[]): number {
+  let count = 0;
+  for (const term of terms) {
+    let index = value.indexOf(term);
+    while (index >= 0) {
+      count += 1;
+      index = value.indexOf(term, index + term.length);
+    }
+  }
+  return count;
 }
 
 function stripBom(value: string): string {
@@ -270,6 +384,7 @@ function safeFallbackTitle(value: string): string {
 }
 
 async function extractPdfMarkdown(filePath: string, options: ExtractOptions): Promise<{
+  metadataOnly: boolean;
   markdown: string;
   assets: ExtractedAsset[];
   warnings: string[];
@@ -285,8 +400,10 @@ async function extractPdfMarkdown(filePath: string, options: ExtractOptions): Pr
       maxBuffer: 50 * 1024 * 1024
     });
     text = stdout;
-  } catch {
-    warnings.push("当前环境没有可用的 pdftotext，PDF 只能记录元数据。Docker 镜像会安装 poppler-utils。");
+  } catch (error) {
+    warnings.push((error as NodeJS.ErrnoException).code === "ENOENT"
+      ? "当前环境没有可用的 pdftotext，PDF 只能记录元数据。Docker 镜像会安装 poppler-utils。"
+      : "PDF 正文转换失败，请检查文件是否损坏、加密或超过转换限制。");
   }
 
   if (options.assetDir && options.assetRelativeDir) {
@@ -312,10 +429,11 @@ async function extractPdfMarkdown(filePath: string, options: ExtractOptions): Pr
 
   const pages = text
     .split(/\f/g)
-    .map((page) => normalizeText(page))
-    .filter(Boolean);
+    .map((page, index) => ({ text: normalizeText(page), number: index + 1 }))
+    .filter((page) => Boolean(page.text));
+  if (!pages.length && !warnings.length) warnings.push("PDF 没有可抽取正文，可能是扫描图片；请先 OCR 后再上传。");
   const body = pages.length
-    ? pages.flatMap((page, index) => [`## Page ${index + 1}`, "", page]).join("\n\n")
+    ? pages.flatMap((page) => [`## Page ${page.number}`, "", page.text]).join("\n\n")
     : await fileMetadata(filePath);
   const imageBlock = assets.length
     ? ["", "## 抽取图片", "", ...assets.map((asset) => `![${asset.fileName}](${assetUrl(asset.relativePath, options)})`)].join("\n")
@@ -323,6 +441,7 @@ async function extractPdfMarkdown(filePath: string, options: ExtractOptions): Pr
   const warningBlock = warnings.length ? ["", "## 转换提示", "", ...warnings.map((item) => `- ${item}`)].join("\n") : "";
 
   return {
+    metadataOnly: pages.length === 0,
     markdown: [`# ${title}`, "", body, imageBlock, warningBlock].join("\n"),
     assets,
     warnings
@@ -347,11 +466,7 @@ async function pandocToMarkdown(
         maxBuffer: 50 * 1024 * 1024
       }
     );
-    const rewritten = stdout.replace(
-      /\]\((?:\.\/)?media\/([^)]+)\)/g,
-      (_match, fileName: string) =>
-        `](${assetUrl(toPosix(path.join(options.assetRelativeDir!, "pandoc-media", "media", fileName)), options)})`
-    );
+    const rewritten = rewriteExtractedMediaLinks(stdout, mediaDir, toPosix(path.join(options.assetRelativeDir, "pandoc-media")), options.assetUrl);
     if (assets) {
       for (const file of await listNestedFiles(mediaDir)) {
         const ext = path.extname(file).toLowerCase();
@@ -368,6 +483,19 @@ async function pandocToMarkdown(
     warnings.push("Pandoc 不可用或转换失败，已使用内置 Office 解析器。");
     return null;
   }
+}
+
+export function rewriteExtractedMediaLinks(markdown: string, mediaDir: string, assetRelativeDir: string, resolveAsset?: (path: string) => string): string {
+  const prefix = mediaDir.replace(/\\/g, "/").replace(/\/+$/, "") + "/";
+  return markdown.replace(/(!\[[^\]]*\])\(([^\n)]+)\)/g, (original, label: string, rawTarget: string) => {
+    let target = rawTarget.replace(/^<|>$/g, "").replace(/\\/g, "/");
+    try { target = decodeURIComponent(target); } catch { return original; }
+    const relative = target.startsWith(prefix) ? target.slice(prefix.length) : /^(?:\.\/)?media\//.test(target) ? target.replace(/^\.\//, "") : undefined;
+    if (!relative || relative.split("/").includes("..")) return original;
+    const assetPath = `${assetRelativeDir}/${relative}`;
+    const url = resolveAsset ? resolveAsset(assetPath) : encodeURI(assetPath);
+    return `${label}(${url})`;
+  });
 }
 
 async function listNestedFiles(root: string): Promise<string[]> {
@@ -449,13 +577,20 @@ function extractPptxMarkdown(filePath: string, options: ExtractOptions, assets: 
 function extractXlsxMarkdown(filePath: string): string {
   const zip = new AdmZip(filePath);
   const sharedStrings = readSharedStrings(zip);
-  const sheetNames = readSheetNames(zip);
-  const sheets = zip
+  const fallbackSheets = zip
     .getEntries()
     .filter((entry) => /^xl\/worksheets\/sheet\d+\.xml$/.test(entry.entryName))
-    .sort((a, b) => a.entryName.localeCompare(b.entryName, undefined, { numeric: true }))
-    .map((entry, index) => {
-      const name = sheetNames[index] || `Sheet ${index + 1}`;
+    .sort((a, b) => a.entryName.localeCompare(b.entryName, undefined, { numeric: true }));
+  const workbook = zip.getEntry("xl/workbook.xml")?.getData().toString("utf8");
+  const relationships = readOfficeRelationships(zip, "xl/_rels/workbook.xml.rels", "xl");
+  const sheetDefinitions = workbook ? [...workbook.matchAll(/<sheet\b[^>]*>/g)].map((match, index) => {
+    const target = relationships.get(xmlAttribute(match[0], "r:id") || "");
+    return { name: decodeXml(xmlAttribute(match[0], "name") || `Sheet ${index + 1}`), entry: target ? zip.getEntry(target) : fallbackSheets[index] };
+  }) : fallbackSheets.map((entry, index) => ({ name: `Sheet ${index + 1}`, entry }));
+  const sheets = sheetDefinitions
+    .filter(({ entry }) => entry && entry.entryName.startsWith("xl/worksheets/"))
+    .map(({ entry, name }) => {
+      if (!entry) return "";
       const table = worksheetToMarkdownTable(entry.getData().toString("utf8"), sharedStrings);
       return [`## ${name}`, "", table || "_空表_"].join("\n");
     });
@@ -533,13 +668,14 @@ async function convertOfficeDocument(
 function wordTableToMarkdown(xml: string): string {
   const rows = [...xml.matchAll(/<w:tr[\s\S]*?<\/w:tr>/g)].map((row) =>
     [...row[0].matchAll(/<w:tc[\s\S]*?<\/w:tc>/g)]
-      .map((cell) => extractWordParagraphText(cell[0]).replace(/\|/g, "\\|"))
+      .map((cell) => extractWordParagraphText(cell[0]).replace(/\|/g, "\\|").replace(/\n/g, "<br>"))
       .map((cell) => cell || " ")
   );
   return markdownTable(rows);
 }
 
 function extractWordParagraphText(xml: string): string {
+  xml = xml.replace(/<w:(?:br|cr)\b[^>]*\/>/g, "<w:t>\n</w:t>").replace(/<w:tab\b[^>]*\/>/g, "<w:t> </w:t>");
   return normalizeText([...xml.matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)].map((match) => decodeXml(match[1])).join(""));
 }
 
@@ -558,25 +694,51 @@ function readSharedStrings(zip: AdmZip): string[] {
   );
 }
 
-function readSheetNames(zip: AdmZip): string[] {
-  const entry = zip.getEntry("xl/workbook.xml");
-  if (!entry) return [];
-  const xml = entry.getData().toString("utf8");
-  return [...xml.matchAll(/<sheet[^>]*name="([^"]+)"/g)].map((match) => decodeXml(match[1]));
+function xmlAttribute(tag: string, name: string): string | undefined {
+  return tag.match(new RegExp(`\\b${name}\\s*=\\s*(["'])(.*?)\\1`))?.[2];
+}
+
+function readOfficeRelationships(zip: AdmZip, entryName: string, directory: string): Map<string, string> {
+  const xml = zip.getEntry(entryName)?.getData().toString("utf8") || "";
+  const targets = new Map<string, string>();
+  for (const match of xml.matchAll(/<Relationship\b[^>]*>/g)) {
+    const id = xmlAttribute(match[0], "Id");
+    const target = xmlAttribute(match[0], "Target");
+    if (!id || !target || xmlAttribute(match[0], "TargetMode") === "External") continue;
+    targets.set(id, path.posix.normalize(target.startsWith("/") ? target.slice(1) : `${directory}/${target}`));
+  }
+  return targets;
 }
 
 function worksheetToMarkdownTable(xml: string, sharedStrings: string[]): string {
   const rows = [...xml.matchAll(/<row[^>]*>([\s\S]*?)<\/row>/g)].map((row) => {
-    const cells = [...row[1].matchAll(/<c([^>]*)>([\s\S]*?)<\/c>/g)];
-    return cells.map((cell) => {
+    const cells = [...row[1].matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)];
+    const values: string[] = [];
+    for (const cell of cells) {
       const attrs = cell[1];
-      const body = cell[2];
-      const value = body.match(/<v>([\s\S]*?)<\/v>/)?.[1] || body.match(/<t[^>]*>([\s\S]*?)<\/t>/)?.[1] || "";
-      const decoded = attrs.includes('t="s"') ? sharedStrings[Number(value)] || "" : decodeXml(value);
-      return normalizeText(decoded).replace(/\|/g, "\\|");
-    });
+      const body = cell[2] || "";
+      const index = cellColumnIndex(attrs) ?? values.length;
+      values[index] = worksheetCellText(attrs, body, sharedStrings);
+    }
+    return values.map((value) => normalizeText(value).replace(/\|/g, "\\|").replace(/\n/g, "<br>"));
   });
   return markdownTable(rows);
+}
+
+function worksheetCellText(attrs: string, body: string, sharedStrings: string[]): string {
+  const value = body.match(/<v>([\s\S]*?)<\/v>/)?.[1];
+  if (value !== undefined) {
+    return attrs.includes('t="s"') ? sharedStrings[Number(value)] || "" : decodeXml(value);
+  }
+
+  const inlineText = [...body.matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map((part) => decodeXml(part[1])).join("");
+  return inlineText;
+}
+
+function cellColumnIndex(attrs: string): number | null {
+  const letters = attrs.match(/\br="([A-Z]+)\d+"/i)?.[1];
+  if (!letters) return null;
+  return [...letters.toUpperCase()].reduce((index, char) => index * 26 + char.charCodeAt(0) - 64, 0) - 1;
 }
 
 function markdownTable(rows: string[][]): string {
@@ -615,10 +777,11 @@ function toPosix(relativePath: string): string {
 }
 
 function decodeXml(input: string): string {
-  return input
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, "\"")
-    .replace(/&apos;/g, "'");
+  const named: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'" };
+  return input.replace(/&((?:amp|lt|gt|quot|apos)|#(?:\d+|x[0-9a-f]+));/gi, (entity, value: string) => {
+    if (!value.startsWith("#")) return named[value.toLowerCase()] || entity;
+    const hexadecimal = value[1].toLowerCase() === "x";
+    const code = Number.parseInt(value.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10);
+    return code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff) ? String.fromCodePoint(code) : entity;
+  });
 }

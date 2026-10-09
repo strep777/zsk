@@ -1,4 +1,7 @@
+FROM node:22-bookworm-slim AS node-runtime
 FROM ubuntu:24.04 AS base
+
+COPY --from=node-runtime /usr/local/ /usr/local/
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV HOME=/tmp
@@ -11,8 +14,6 @@ RUN apt-get update \
     libreoffice-calc \
     libreoffice-impress \
     libreoffice-writer \
-    nodejs \
-    npm \
     pandoc \
     poppler-utils \
     unzip \
@@ -20,7 +21,7 @@ RUN apt-get update \
 
 FROM base AS deps
 COPY package.json package-lock.json* ./
-RUN npm install
+RUN npm ci
 
 FROM deps AS build
 COPY . .
@@ -33,7 +34,7 @@ ENV PORT=3000
 ENV LLM_WIKI_DATA_DIR=/data
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm install --omit=dev
+RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 EXPOSE 3000
 VOLUME ["/data"]

@@ -47,12 +47,77 @@ export interface QueueItem {
   error?: string;
 }
 
+export interface QueueStats {
+  total: number;
+  queued: number;
+  running: number;
+  done: number;
+  failed: number;
+}
+
+export interface SourceStats {
+  total: number;
+  queued: number;
+  ingesting: number;
+  ready: number;
+  skipped: number;
+  failed: number;
+}
+
+export interface IngestProgressItem {
+  id: string;
+  sourceId: string;
+  relativePath: string;
+  fileName: string;
+  title?: string;
+  kind?: string;
+  size?: number;
+  status: QueueItem["status"];
+  updatedAt: string;
+  error?: string;
+}
+
+export interface IngestProgress {
+  total: number;
+  processed: number;
+  queued: number;
+  running: number;
+  done: number;
+  failed: number;
+  percent: number;
+  currentIndex: number;
+  active?: IngestProgressItem;
+  next?: IngestProgressItem;
+  updatedAt?: string;
+}
+
+export interface ArchiveImportProgress {
+  id: string;
+  fileName: string;
+  status: "extracting" | "registering" | "done" | "failed";
+  totalEntries: number;
+  processedEntries: number;
+  extractedFiles: number;
+  queued: number;
+  skipped: number;
+  directory?: string;
+  currentEntry?: string;
+  detail?: string;
+  error?: string;
+  startedAt: string;
+  updatedAt: string;
+}
+
 export interface ActivitySnapshot {
   queue: QueueItem[];
   sources: SourceRecord[];
   queueTotal?: number;
   sourceTotal?: number;
   sourceBytesTotal?: number;
+  queueStats?: QueueStats;
+  sourceStats?: SourceStats;
+  ingestProgress?: IngestProgress;
+  archiveProgress?: ArchiveImportProgress[];
 }
 
 export interface SearchHit {
@@ -80,6 +145,7 @@ export interface ChatMessage {
   createdAt: string;
   citations?: string[];
   attachments?: ChatAttachment[];
+  researchTask?: ResearchTask;
 }
 
 export interface ChatSession {
@@ -88,6 +154,32 @@ export interface ChatSession {
   createdAt: string;
   updatedAt: string;
   messages: ChatMessage[];
+}
+
+export interface ResearchTaskStep {
+  id: string;
+  label: string;
+  status: "pending" | "running" | "done" | "failed";
+  detail?: string;
+  updatedAt?: string;
+}
+
+export interface ResearchTask {
+  id: string;
+  topic: string;
+  queries: string[];
+  modelId?: string;
+  status: "queued" | "running" | "done" | "failed";
+  progress: number;
+  steps: ResearchTaskStep[];
+  createdAt: string;
+  updatedAt: string;
+  result?: {
+    path: string;
+    markdown: string;
+    queries: string[];
+  };
+  error?: string;
 }
 
 export interface GraphNode {
@@ -126,20 +218,65 @@ export interface LintIssue {
 
 export interface ProjectSettings {
   language: string;
-  provider:
-    | "offline"
-    | "openai"
-    | "volcengine"
-    | "volcengine-coding-plan"
-    | "ollama"
-    | "anthropic"
-    | "gemini"
-    | "custom";
+  provider: ProviderKind;
   model: string;
   baseUrl: string;
   apiKey?: string;
+  activeModelId?: string;
+  modelProfiles: ModelProfile[];
   systemPrompt: string;
-  webSearchProvider: "none" | "searxng" | "tavily" | "serpapi";
+  webSearchProvider: "none" | "typesense" | "searxng" | "tavily" | "serpapi";
   webSearchUrl?: string;
   webSearchApiKey?: string;
+  webSearchCollection?: string;
+  webSearchQueryBy?: string;
+  localSearchProvider?: "builtin" | "typesense";
+  typesenseUrl?: string;
+  typesenseApiKey?: string;
+  typesenseCollection?: string;
+  skills: SkillDefinition[];
+  mcpServers: McpServerConfig[];
+}
+
+export type ProviderKind =
+  | "offline"
+  | "openai"
+  | "volcengine"
+  | "volcengine-coding-plan"
+  | "ollama"
+  | "anthropic"
+  | "gemini"
+  | "custom";
+
+export interface ModelProfile {
+  id: string;
+  name: string;
+  provider: ProviderKind;
+  model: string;
+  baseUrl: string;
+  apiKey?: string;
+  enabled: boolean;
+}
+
+export interface SkillDefinition {
+  id: string;
+  name: string;
+  description?: string;
+  prompt: string;
+  tags?: string[];
+  enabled: boolean;
+}
+
+export interface McpServerConfig {
+  id: string;
+  name: string;
+  description?: string;
+  transport: "stdio" | "http" | "sse";
+  command?: string;
+  args?: string[];
+  url?: string;
+  apiKey?: string;
+  tools?: string[];
+  resources?: string[];
+  enabled: boolean;
 }
